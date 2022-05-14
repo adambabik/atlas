@@ -6,32 +6,50 @@ package migrate
 
 import (
 	"context"
+	"strings"
 
 	"ariga.io/atlas/cmd/atlascmd/migrate/ent"
 	"ariga.io/atlas/cmd/atlascmd/migrate/ent/revision"
 	"ariga.io/atlas/sql/migrate"
 	"ariga.io/atlas/sql/schema"
+	"ariga.io/atlas/sql/sqlclient"
 	"entgo.io/ent/dialect/sql"
 	entschema "entgo.io/ent/dialect/sql/schema"
 )
 
 // A EntRevisions provides implementation for the migrate.RevisionReadWriter interface.
-type EntRevisions struct{ c *ent.Client }
+type EntRevisions struct {
+	ac     *sqlclient.Client // underlying Atlas client.
+	ec     *ent.Client       // underlying Ent client
+	schema string            // name of the schema the revision table resides in
+}
 
-// NewEntRevisions creates a new EntRevisions with the given ent.Client.
-func NewEntRevisions(db schema.ExecQuerier, dialect string, opts ...ent.Option) *EntRevisions {
-	opts = append(opts, ent.Driver(sql.NewDriver(dialect, sql.Conn{ExecQuerier: db})))
-	return &EntRevisions{ent.NewClient(opts...)}
+// NewEntRevisions creates a new EntRevisions with the given ec.Client.
+func NewEntRevisions(ac *sqlclient.Client, schema string) (*EntRevisions, error) {
+	if schema == "" {
+		schema = "atlas_schema_revisions"
+	}
+	ec, err := ent.Open(ac.Name, strings.TrimSuffix(ac.URL.DSN, ac.URL.Schema)+schema)
+	if err != nil {
+		return nil, err
+	}
+	return &EntRevisions{ac, ec, schema}, nil
 }
 
 // Init makes sure the revision table does exist in the connected database.
 func (r *EntRevisions) Init(ctx context.Context) error {
-	return r.c.Schema.Create(ctx, entschema.WithAtlas(true))
+	// Create the schema.
+	if err := r.ac.ApplyChanges(ctx, []schema.Change{
+		&schema.AddSchema{S: &schema.Schema{Name: r.schema}, Extra: []schema.Clause{&schema.IfNotExists{}}},
+	}); err != nil {
+		return err
+	}
+	return r.ec.Schema.Create(ctx, entschema.WithAtlas(true))
 }
 
 // ReadRevisions reads the revisions from the revisions table.
 func (r *EntRevisions) ReadRevisions(ctx context.Context) (migrate.Revisions, error) {
-	revs, err := r.c.Revision.Query().Order(ent.Asc(revision.FieldID)).All(ctx)
+	revs, err := r.ec.Revision.Query().Order(ent.Asc(revision.FieldID)).All(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +73,7 @@ func (r *EntRevisions) ReadRevisions(ctx context.Context) (migrate.Revisions, er
 func (r *EntRevisions) WriteRevisions(ctx context.Context, rs migrate.Revisions) error {
 	bulk := make([]*ent.RevisionCreate, len(rs))
 	for i, rev := range rs {
-		bulk[i] = r.c.Revision.Create().
+		bulk[i] = r.ec.Revision.Create().
 			SetID(rev.Version).
 			SetDescription(rev.Description).
 			SetExecutionState(revision.ExecutionState(rev.ExecutionState)).
@@ -65,7 +83,7 @@ func (r *EntRevisions) WriteRevisions(ctx context.Context, rs migrate.Revisions)
 			SetOperatorVersion(rev.OperatorVersion).
 			SetMeta(rev.Meta)
 	}
-	return r.c.Revision.CreateBulk(bulk...).
+	return r.ec.Revision.CreateBulk(bulk...).
 		OnConflict(
 			sql.ConflictColumns(revision.FieldID),
 		).

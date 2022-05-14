@@ -334,7 +334,7 @@ func NewExecutor(drv Driver, dir Dir, rrw RevisionReadWriter, opts ...ExecutorOp
 		return nil, errors.New("sql/migrate: execute: dir cannot be nil")
 	}
 	if rrw == nil {
-		return nil, errors.New("sql/migrate: execute: mockRevisionReadWriter cannot be nil")
+		return nil, errors.New("sql/migrate: execute: rrw cannot be nil")
 	}
 	// If the driver does not support acquiring a lock, don't execute migrations as this can potentially be fatal.
 	if _, ok := drv.(schema.Locker); !ok {
@@ -365,7 +365,6 @@ func (e *Executor) Execute(ctx context.Context, n int) (err error) {
 	}
 	defer unlock()
 	// Don't operate with a broken migration directory.
-	// TODO(maseeelch): do not check here but let the caller check it before? Or let the caller decide if to skip this flag by using some flags.
 	if err := Validate(e.dir); err != nil {
 		return fmt.Errorf("sql/migrate: execute: validate migration directory: %w", err)
 	}
@@ -373,6 +372,12 @@ func (e *Executor) Execute(ctx context.Context, n int) (err error) {
 	sc, ok := e.dir.(Scanner)
 	if !ok {
 		return errors.New("sql/migrate: execute: no scanner available")
+	}
+	// Atlas will make sure to call Init() on any given RevisionReadWriter if they provide it.
+	if init, ok := e.rrw.(interface{ Init(context.Context) error }); ok {
+		if err := init.Init(ctx); err != nil {
+			return fmt.Errorf("sql/migrate: execute: initialize revisions storage: %w", err)
+		}
 	}
 	// Read all applied database revisions.
 	revisions, err := e.rrw.ReadRevisions(ctx)
@@ -394,7 +399,7 @@ func (e *Executor) Execute(ctx context.Context, n int) (err error) {
 		return ErrNoPendingFiles
 	}
 	// For up to len(revisions) revisions the migration files must both match in order and content.
-	if len(revisions) > len(migrations) { // TODO(masseelch): keep compaction in mind.
+	if len(revisions) > len(migrations) { // TODO(masseelch): keep compaction / squash in mind.
 		return errors.New("sql/migrate: execute: revisions and migrations mismatch: more revisions than migrations")
 	}
 	for i := range revisions {
@@ -416,12 +421,12 @@ func (e *Executor) Execute(ctx context.Context, n int) (err error) {
 		return ErrNoPendingFiles
 	}
 	defer func(rrw RevisionReadWriter, ctx context.Context, revisions *Revisions) {
-		if dErr := rrw.WriteRevisions(ctx, *revisions); dErr != nil {
+		if err2 := rrw.WriteRevisions(ctx, *revisions); err2 != nil {
 			if err != nil {
-				err = fmt.Errorf("sql/migrate: execute: write revisions: %w: %v", dErr, err)
+				err = fmt.Errorf("sql/migrate: execute: write revisions: %w: %v", err2, err)
 				return
 			}
-			err = dErr
+			err = err2
 		}
 	}(e.rrw, ctx, &revisions)
 	// Determine what migrations to run.
