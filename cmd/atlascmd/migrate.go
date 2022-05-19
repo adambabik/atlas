@@ -204,12 +204,12 @@ func CmdMigrateApplyRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Get the correct log format and destination.
+	// Get the correct log format and destination. Currently, only os.Stdout is supported.
 	l, err := logFormat(os.Stdout)
 	if err != nil {
 		return err
 	}
-	// Currently, only in DB revisions are supported. // TODO(masseelch): I do not like this without a flag present.
+	// Currently, only in DB revisions are supported.
 	rrw, err := entmigrate.NewEntRevisions(target, MigrateFlags.RevisionSchema)
 	if err != nil {
 		return err
@@ -428,7 +428,16 @@ const (
 type LogTTY struct{ out io.Writer }
 
 func (l *LogTTY) Log(e migrate.LogEntry) {
-	_, _ = l.out.Write([]byte("I am not yet implemented!"))
+	switch e := e.(type) {
+	case migrate.LogExecution:
+		fmt.Fprintf(l.out, "Migrating to version %s from %s (%d migrations in total)\n", e.From, e.To, len(e.Files))
+	case migrate.LogFile:
+		fmt.Fprintf(l.out, "\n%s-- migrating version %s\n", strings.Repeat(" ", 2), e.Version)
+	case migrate.LogStmt:
+		fmt.Fprintf(l.out, "%s-> %s\n", strings.Repeat(" ", 4), e.SQL)
+	default:
+		l.out.Write([]byte(fmt.Sprintf("%v", e)))
+	}
 }
 
 func logFormat(out io.Writer) (migrate.Logger, error) {

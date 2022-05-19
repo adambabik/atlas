@@ -430,7 +430,14 @@ func (e *Executor) Execute(ctx context.Context, n int) (err error) {
 		}
 	}(e.rrw, ctx, &revisions)
 	// Determine what migrations to run.
-	var pending []File
+	var (
+		from    string
+		to      string
+		pending []File
+	)
+	if len(revisions) > 0 {
+		from = revisions[len(revisions)-1].Version
+	}
 	if n <= 0 {
 		// If n<=0 run every pending migrations.
 		pending = migrations[len(revisions):]
@@ -442,12 +449,21 @@ func (e *Executor) Execute(ctx context.Context, n int) (err error) {
 		}
 		pending = migrations[len(revisions) : len(revisions)+n]
 	}
+	last := pending[len(pending)-1]
+	to, err = sc.Version(last)
+	if err != nil {
+		return fmt.Errorf("sql/migrate: execute: scan version from %q: %w", last.Name(), err)
+	}
 	if e.log != nil {
 		names := make([]string, len(pending))
 		for i := range pending {
 			names[i] = pending[i].Name()
 		}
-		e.log.Log(LogExecution{names})
+		e.log.Log(LogExecution{
+			From:  from,
+			To:    to,
+			Files: names,
+		})
 	}
 	// TODO(masseelch): run in a transaction
 	for _, m := range pending {
@@ -610,6 +626,8 @@ type (
 	// LogExecution is sent once when execution of the migration files has been started.
 	// It holds the filenames of the pending migration files.
 	LogExecution struct {
+		From  string
+		To    string
 		Files []string
 	}
 
